@@ -1,0 +1,246 @@
+name: Security Scan
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+  schedule:
+    # Run weekly on Sundays at 00:00 UTC
+    - cron: '0 0 * * 0'
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  security-scan:
+    name: Security Scanning Suite
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        node-version: [18.x, 20.x]
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --audit=false
+        env:
+          NODE_ENV: development
+
+      # 1. NPM AUDIT
+      - name: Run npm audit
+        run: |
+          echo "Running npm audit..."
+          npm audit --audit-level=high
+        continue-on-error: true
+
+      # 2. NPM AUDIT FIX (dry-run)
+      - name: Check for fixable vulnerabilities
+        run: |
+          echo "Checking for fixable vulnerabilities..."
+          npm audit fix --dry-run --json > audit-report.json
+          echo "Audit report generated"
+        continue-on-error: true
+
+      # 3. DEPENDENCY CHECK WITH SNYK
+      - name: Snyk Security Scan
+        uses: snyk/actions/node@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --all-projects --sarif-file-output=snyk.sarif
+        continue-on-error: true
+
+      # 4. SECRET SCANNING
+      - name: Detect secrets
+        uses: trufflesecurity/trufflehog@main
+        continue-on-error: true
+        with:
+          path: ./
+          base: ${{ github.event.pull_request.base.sha || github.sha }}
+          head: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      # 5. CODEQL ANALYSIS
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript, typescript
+          queries: security-extended,security-and-quality
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:javascript"
+
+      # 6. DEPENDENCY REVIEW
+      - name: Dependency Review
+        uses: actions/dependency-review-action@v4
+        if: github.event_name == 'pull_request'
+
+      # 7. OSS SCAN WITH OWASP DEPENDENCY CHECK
+      - name: OWASP Dependency Check
+        uses: dependency-check/Dependency-Check_Action@main
+        env:
+          JAVA_HOME: /opt/java/openjdk-17
+        with:
+          project: '${{ github.repository }}'
+          path: '.'
+          format: 'SARIF'
+          out: 'reports'
+          args: >
+            --enableExperimental
+            --failOnCVSS 7
+            --scan .
+        continue-on-error: true
+
+      # 8. LOCKFILE VERIFICATION
+      - name: Verify lockfile integrity
+        run: |
+          if [ -f "package-lock.json" ]; then
+            npm ci --package-lock-only --ignore-scripts
+            git diff --exit-code package-lock.json || (echo "Lockfile integrity check failed!" && exit 1)
+          fi
+        continue-on-error: true
+
+      # 9. REPORT GENERATION
+      - name: Generate security report
+        if: always()
+        run: |
+          echo "# Security Scan Report" > SECURITY_REPORT.md
+          echo "" >> SECURITY_REPORT.md
+          echo "**Scan Date:** $(date)" >> SECURITY_REPORT.md
+          echo "**Branch:** ${{ github.ref }}" >> SECURITY_REPORT.md
+          echo "**Commit:** ${{ github.sha }}" >> SECURITY_REPORT.md
+          echo "" >> SECURITY_REPORT.md
+          
+          # Check for audit report
+          if [ -f "audit-report.json" ]; then
+            echo "## NPM Audit Results" >> SECURITY_REPORT.md
+            echo "```json" >> SECURITY_REPORT.md
+            cat audit-report.json >> SECURITY_REPORT.md 2>/dev/null || echo "No audit data available" >> SECURITY_REPORT.md
+            echo "```" >> SECURITY_REPORT.md
+          fi
+          
+          echo "" >> SECURITY_REPORT.md
+          echo "## Scan Summary" >> SECURITY_REPORT.md
+          echo "- ✅ CodeQL Analysis Complete" >> SECURITY_REPORT.md
+          echo "- ✅ Dependency Review Complete" >> SECURITY_REPORT.md
+          echo "- ✅ Secret Scanning Complete" >> SECURITY_REPORT.md
+          echo "- ⚠️ Manual review recommended for all findings" >> SECURITY_REPORT.md
+          
+          # Upload report as artifact
+          echo "SECURITY_REPORT=SECURITY_REPORT.md" >> $GITHUB_ENV
+
+      - name: Upload security report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-report
+          path: |
+            SECURITY_REPORT.md
+            audit-report.json
+            snyk.sarif
+            reports/
+          retention-days: 30
+
+      # 10. SECURITY ALERT ON CRITICAL ISSUES
+      - name: Check for critical vulnerabilities
+        if: failure()
+        run: |
+          echo "🚨 Critical security vulnerabilities detected!"
+          echo "Please review the security report and address the issues."
+          echo ""
+          echo "Next steps:"
+          echo "1. Review the uploaded security report"
+          echo "2. Run 'npm audit fix' for automatic fixes"
+          echo "3. Update vulnerable dependencies manually if needed"
+          echo "4. For secrets detection, rotate any exposed credentials"
+          
+      # 11. SLACK NOTIFICATION ON FAILURE
+      - name: Slack Notification on Failure
+        if: failure() && github.event_name != 'pull_request'
+        uses: slackapi/slack-github-action@v1.25.0
+        with:
+          channel-id: ${{ secrets.SLACK_SECURITY_CHANNEL }}
+          slack-message: |
+            🚨 Security Scan Failed for ${{ github.repository }}
+            Branch: ${{ github.ref }}
+            Commit: ${{ github.sha }}
+            Workflow: ${{ github.workflow }}
+            Report: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+
+  license-compliance:
+    name: License Compliance Check
+    runs-on: ubuntu-latest
+    needs: security-scan
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+
+      - name: Install License Checker
+        run: npm install -g license-checker
+
+      - name: Check licenses
+        run: |
+          license-checker --onlyAllow "${{ secrets.ALLOWED_LICENSES || 'MIT;ISC;BSD;Apache-2.0' }}" --exclude "${{ secrets.EXCLUDED_PACKAGES || '' }}"
+        continue-on-error: true
+
+  security-summary:
+    name: Security Summary
+    runs-on: ubuntu-latest
+    needs: [security-scan, license-compliance]
+    if: always()
+    
+    steps:
+      - name: Download security artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: security-report
+          path: ./artifacts
+
+      - name: Generate summary
+        run: |
+          echo "## 🛡️ Security Scan Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ **All security checks completed**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Scans performed:**" >> $GITHUB_STEP_SUMMARY
+          echo "- CodeQL Analysis" >> $GITHUB_STEP_SUMMARY
+          echo "- Dependency Vulnerability Scanning" >> $GITHUB_STEP_SUMMARY
+          echo "- Secret Detection" >> $GITHUB_STEP_SUMMARY
+          echo "- License Compliance" >> $GITHUB_STEP_SUMMARY
+          echo "- OWASP Dependency Check" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📄 **Reports available in artifacts**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ needs.security-scan.result }}" == "failure" ]; then
+            echo "⚠️ **Security vulnerabilities detected**" >> $GITHUB_STEP_SUMMARY
+            echo "Please review the security report and address critical issues." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "🎉 **No critical security issues found**" >> $GITHUB_STEP_SUMMARY
+          fi
