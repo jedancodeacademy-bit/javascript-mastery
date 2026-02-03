@@ -3,10 +3,10 @@
 
 ## 📚 Table of Contents
 1. [Introduction](#introduction)
-2. [Function Types & Patterns](#function-types--patterns)
+2. [Function Types & Patterns](functions/README.md)
 3. [Scope & Closures](#scope--closures)
-4. [Higher-Order Functions](#higher-order-functions)
-5. [Projects](#projects)
+4. [Higher-Order Functions](higher-orders/README.md)
+5. [Projects](projects/README.md)
 6. [Best Practices](#best-practices)
 7. [Performance Considerations](#performance-considerations)
 
