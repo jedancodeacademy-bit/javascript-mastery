@@ -27,7 +27,7 @@
 
 ### 📚 Learning Path
 - [📖 Module 1: Getting Started](00-getting-started/README.md)
-- [🎯 Module 2: Functions & Scope](#-module-2-functions--scope)
+- [🎯 Module 2: Functions & Scope](01-functions-scope/README.md)
 - [🏗️ Module 3: Objects & Arrays](#️-module-3-objects--arrays)
 - [🌐 Module 4: DOM & Events](#-module-4-dom--events)
 - [⚡ Module 5: Asynchronous JavaScript](#-module-5-asynchronous-javascript)
